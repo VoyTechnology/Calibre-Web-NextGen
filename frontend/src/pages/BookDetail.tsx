@@ -2,7 +2,7 @@ import { BookReview } from '../components/BookReview';
 import { PersonalRating } from '../components/PersonalRating';
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, Fragment } from 'react';
 import { Link, useParams, useLocation } from 'wouter';
-import { Download, Pencil, Star, Archive, EyeOff, Eye, Send, Highlighter, Image as ImageIcon, Plus, X, BookOpen, BookCheck, BookPlus, BookX, Glasses, Trash2, RefreshCw, TabletSmartphone, Settings, Upload as UploadIcon } from 'lucide-react';
+import { Download, Pencil, Star, Archive, EyeOff, Eye, Send, Highlighter, Image as ImageIcon, Plus, X, BookOpen, BookCheck, BookPlus, BookX, Glasses, Trash2, RefreshCw, TabletSmartphone, Usb, Check, Settings, Upload as UploadIcon } from 'lucide-react';
 import {
   useBook, useToggleRead, useStopReading, useSetReadingStatus, useToggleFavorite, useToggleArchived, useToggleHidden,
   useSendToEreader, useMe, useAccount, useUpdateMetadata, useDeleteBook, useReloadMetadata,
@@ -11,6 +11,7 @@ import {
   useActiveDeliveryDevices, useQueueDeviceDelivery, useOtherEreaders,
   useDeleteFormat, useConvertFormat, useAddFormat, useConversionTask,
 } from '../lib/queries';
+import { useKindleDevice, describeUsbError } from '../lib/kindleDevice';
 import { authorityLabel, opaqueLabel } from '../lib/koboTwoWay';
 import { MetadataTypeahead } from '../components/MetadataTypeahead';
 import { Pill } from '../components/Pill';
@@ -479,6 +480,32 @@ export function BookDetail() {
   };
   const [deviceSendOpen, setDeviceSendOpen] = useState(false);
   const [deviceSendBanner, setDeviceSendBanner] = useState<{ ok: boolean; text: string } | null>(null);
+  // Send the book to a USB-connected Kindle. The connection and the list of what is on the device live in
+  // the app shell, so this page only asks "is it there?" and "send it".
+  const kindle = useKindleDevice();
+  const [usbPhase, setUsbPhase] = useState<string | null>(null);
+  const [usbBanner, setUsbBanner] = useState<{ ok: boolean; text: string } | null>(null);
+  const onKindle = book ? kindle.onDevice(book.id) : undefined;
+  const usbPhaseLabels: Record<string, string> = {
+    connecting: t('Connecting…'), preparing: t('Preparing…'), downloading: t('Downloading…'), sending: t('Sending…'),
+  };
+  const sendOverUsb = async () => {
+    if (!book) return;
+    setUsbBanner(null);
+    try {
+      const result = await kindle.send(book.id, (phase) => setUsbPhase(usbPhaseLabels[phase] ?? phase));
+      setUsbBanner({
+        ok: true,
+        text: t('Sent to your Kindle as {format}. Eject it from the Kindle to see the book.', { format: result.format }),
+      });
+    } catch (err) {
+      const message = describeUsbError(err);
+      if (message === null) return; // closing the device chooser is a choice, not a failure
+      setUsbBanner({ ok: false, text: err instanceof ApiError ? err.message : message || t('Could not send to the Kindle.') });
+    } finally {
+      setUsbPhase(null);
+    }
+  };
   /* Panels opened from the gear menu need a scroll nudge: the menu item's click
      doesn't pull the page to the row the way the old in-row button's click did,
      so a panel could open under the sticky TopBar or below the fold. 'nearest'
@@ -752,6 +779,22 @@ export function BookDetail() {
             {t('Send to e-reader')}
           </button>}
 
+          {inLibrary && kindle.status !== 'unsupported' && !!me?.role?.download && !me.role.anonymous
+            && book.formats.length > 0 && (
+            <button type="button" className={styles.actionSecondary} data-testid="send-to-device"
+              disabled={usbPhase !== null || kindle.status === 'connecting' || !!onKindle}
+              onClick={() => { void sendOverUsb(); }}
+              title={onKindle
+                ? t('This book is already on {name}.', { name: kindle.name || 'your Kindle' })
+                : t('Copy this book to a Kindle connected by USB')}>
+              {onKindle ? (
+                <><Check size={15} aria-hidden="true" focusable={false} />{t('Already on device')}</>
+              ) : (
+                <><Usb size={15} aria-hidden="true" focusable={false} />{usbPhase ?? t('Send to device')}</>
+              )}
+            </button>
+          )}
+
           {/* One visible edit action: Edit metadata for anyone allowed to edit
               the book, since that is the edit people reach for most (#2338).
               A reader whose only edit is their own cover keeps Edit cover
@@ -822,6 +865,11 @@ export function BookDetail() {
       {/* Send-to-e-reader / send-to-device panels (opened from the action row),
           directly under the row that opens them. */}
       <div ref={sendPanelWrapRef} className={styles.sendPanelWrap}>
+        {usbBanner && (
+          <p className={usbBanner.ok ? styles.sendOk : styles.sendErr} role="status" data-testid="send-to-device-status">
+            {usbBanner.text}
+          </p>
+        )}
         {sendOpen && (
         <SendPanel
           key={`${id}:${me?.id}:${formatsKey}`}

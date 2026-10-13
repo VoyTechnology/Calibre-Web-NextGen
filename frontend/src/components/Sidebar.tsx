@@ -3,9 +3,11 @@ import { Link, useLocation } from 'wouter';
 import {
   Library, Globe, BookCopy, BookPlus, Tag,
   Info, ListChecks, Table2, Wand2, Files, SlidersHorizontal, Check, RotateCcw, X, Pin, PinOff, ChevronDown, Plus,
+  Unplug,
 } from 'lucide-react';
 import { useShelves, useMe, useMagicShelves, useUpdateSidebar } from '../lib/queries';
 import { useT } from '../lib/i18n';
+import { useKindleDevice } from '../lib/kindleDevice';
 import { useIsDrawerMode } from '../lib/a11y/useIsDrawerMode';
 import { useFocusTrap } from '../lib/a11y/useFocusTrap';
 import { useAnnouncer } from '../lib/a11y/announcer';
@@ -109,6 +111,7 @@ export function Sidebar({ open, onClose, onNavigate }: SidebarProps) {
   const [shelvesExpanded, setShelvesExpanded] = usePersistentBool('cwng:shelves-expanded', true);
   const [smartExpanded, setSmartExpanded] = usePersistentBool('cwng:smart-shelves-expanded', true);
   const magicShelves = useMagicShelves().data?.items ?? [];
+  const device = useKindleDevice();
   const me = useMe().data;
   const canEdit = !!me?.role?.edit;
   const isAdmin = !!me?.role?.admin;
@@ -373,6 +376,47 @@ export function Sidebar({ open, onClose, onNavigate }: SidebarProps) {
                   <span>{t(personalLibrary ? 'My Library' : 'Library')}</span>
                 </Link>
               </li>
+              {device.status !== 'unsupported' && device.status !== 'none' && (
+                <li>
+                  <ul className={styles.shelfList} role="list" aria-label={t('Connected device')}>
+                    <li className={styles.sectionHeader} data-testid="sidebar-device">
+                      {device.status === 'connected' ? (
+                        <>
+                          <Link
+                            href="/device"
+                            className={isActive(location, '/device', true) ? styles.shelfItemActive : styles.shelfItem}
+                            aria-current={isActive(location, '/device', true) ? 'page' : undefined}
+                            onClick={onNavigate}
+                            title={device.name}
+                          >
+                            <span className={styles.shelfInitials} aria-hidden="true">{device.name}</span>
+                            <span className={styles.shelfName}>{device.name}</span>
+                            <span className={styles.shelfCount}>{device.entries.length}</span>
+                          </Link>
+                          <button type="button" className={styles.sectionControl}
+                            aria-label={t('Eject {name}', { name: device.name })}
+                            title={t('Eject {name}', { name: device.name })}
+                            data-testid="sidebar-device-eject"
+                            onClick={() => {
+                              void device.eject().then(() => announce(t('{name} ejected. It is safe to unplug.', { name: device.name })));
+                            }}>
+                            <Unplug size={16} aria-hidden="true" focusable={false} />
+                          </button>
+                        </>
+                      ) : (
+                        <Link href="/device" className={styles.shelfItem} onClick={onNavigate} data-testid="sidebar-device-state">
+                          <span className={styles.shelfInitials} aria-hidden="true">{device.name || 'Kindle'}</span>
+                          <span className={styles.shelfName}>
+                            {device.status === 'connecting' ? t('Connecting…')
+                              : device.status === 'ejected' ? t('{name} ejected', { name: device.name || 'Kindle' })
+                              : t('Kindle not connected')}
+                          </span>
+                        </Link>
+                      )}
+                    </li>
+                  </ul>
+                </li>
+              )}
               {showGlobalLibrary && (
                 <li>
                   <Link href="/global"

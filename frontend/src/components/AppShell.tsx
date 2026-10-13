@@ -9,6 +9,8 @@ import { SkipLink } from './SkipLink';
 import { UserNoticeBanner } from './UserNotices';
 import { contextSidebarForLocation } from '../lib/contextSidebars';
 import { useIsDrawerMode } from '../lib/a11y/useIsDrawerMode';
+import { useMe } from '../lib/queries';
+import { KindleDeviceProvider } from '../lib/kindleDevice';
 import styles from './AppShell.module.css';
 
 interface AppShellProps {
@@ -19,7 +21,14 @@ interface AppShellProps {
 }
 
 export function AppShell(props: AppShellProps) {
-  return <ShelfDragProvider><ShellContents {...props} /></ShelfDragProvider>;
+  const me = useMe().data;
+  // A USB Kindle is only offered to a signed-in account allowed to download books.
+  const kindleEnabled = !!me?.id && !me.role?.anonymous && !!me.role?.download;
+  return (
+    <KindleDeviceProvider enabled={kindleEnabled}>
+      <ShelfDragProvider><ShellContents {...props} /></ShelfDragProvider>
+    </KindleDeviceProvider>
+  );
 }
 
 function ShellContents({ userName, instanceName, onLogout, children }: AppShellProps) {

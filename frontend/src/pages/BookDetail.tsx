@@ -11,7 +11,7 @@ import {
   useActiveDeliveryDevices, useQueueDeviceDelivery, useOtherEreaders,
   useDeleteFormat, useConvertFormat, useAddFormat, useConversionTask,
 } from '../lib/queries';
-import { useKindleDevice, describeUsbError } from '../lib/kindleDevice';
+import { useDevices, useDeviceSources } from '../lib/device';
 import { authorityLabel, opaqueLabel } from '../lib/koboTwoWay';
 import { MetadataTypeahead } from '../components/MetadataTypeahead';
 import { Pill } from '../components/Pill';
@@ -480,30 +480,38 @@ export function BookDetail() {
   };
   const [deviceSendOpen, setDeviceSendOpen] = useState(false);
   const [deviceSendBanner, setDeviceSendBanner] = useState<{ ok: boolean; text: string } | null>(null);
-  // Send the book to a USB-connected Kindle. The connection and the list of what is on the device live in
-  // the app shell, so this page only asks "is it there?" and "send it".
-  const kindle = useKindleDevice();
-  const [usbPhase, setUsbPhase] = useState<string | null>(null);
+  // Send the book to a device plugged in over USB. The connections and the lists of what is on each
+  // device live in the app shell, so this page only asks "is it there?" and "send it".
+  const devices = useDevices();
+  // A kind with nothing connected yet still gets a button: it opens the browser's device chooser.
+  const unconnectedSources = useDeviceSources().filter((s) => !devices.some((d) => d.kind === s.kind));
+  const [usbSending, setUsbSending] = useState<{ key: string; label: string } | null>(null);
   const [usbBanner, setUsbBanner] = useState<{ ok: boolean; text: string } | null>(null);
-  const onKindle = book ? kindle.onDevice(book.id) : undefined;
   const usbPhaseLabels: Record<string, string> = {
     connecting: t('Connecting…'), preparing: t('Preparing…'), downloading: t('Downloading…'), sending: t('Sending…'),
   };
-  const sendOverUsb = async () => {
+  /** `key` names the button that is working; `go` connects the device when needed and sends to it. */
+  const sendOverUsb = async (
+    key: string,
+    go: (phase: (key: string) => void) => Promise<{ name: string; format: string } | null>,
+    describe: (err: unknown) => string | null,
+  ) => {
     if (!book) return;
     setUsbBanner(null);
+    const phase = (step: string) => setUsbSending({ key, label: usbPhaseLabels[step] ?? step });
     try {
-      const result = await kindle.send(book.id, (phase) => setUsbPhase(usbPhaseLabels[phase] ?? phase));
+      const result = await go(phase);
+      if (!result) return; // closed the device chooser
       setUsbBanner({
         ok: true,
-        text: t('Sent to your Kindle as {format}. Eject it from the Kindle to see the book.', { format: result.format }),
+        text: t('Sent to {name} as {format}. Eject it here, then unplug it to see the book.', result),
       });
     } catch (err) {
-      const message = describeUsbError(err);
+      const message = describe(err);
       if (message === null) return; // closing the device chooser is a choice, not a failure
-      setUsbBanner({ ok: false, text: err instanceof ApiError ? err.message : message || t('Could not send to the Kindle.') });
+      setUsbBanner({ ok: false, text: err instanceof ApiError ? err.message : message || t('Could not send to the device.') });
     } finally {
-      setUsbPhase(null);
+      setUsbSending(null);
     }
   };
   /* Panels opened from the gear menu need a scroll nudge: the menu item's click
@@ -660,6 +668,30 @@ export function BookDetail() {
       onSelect: () => { setDeviceSendOpen((v) => !v); setDeviceSendBanner(null); },
     });
   }
+  for (const device of devices) {
+    const entry = device.onDevice(book.id);
+    if (!entry) continue;
+    const name = device.name || device.label;
+    menuItems.push({
+      id: `remove-from-${device.kind}`,
+      label: t('Remove from {name}', { name }),
+      icon: <Usb size={15} />,
+      danger: true,
+      disabled: usbSending !== null || device.busy !== null,
+      onSelect: () => {
+        if (!window.confirm(t('Remove "{title}" from {name}? The book stays in your library.', { title: book.title, name }))) return;
+        setUsbBanner(null);
+        device.remove(entry.handle).then(
+          () => announce(t('Removed from {name}.', { name })),
+          (err) => {
+            const message = device.describeError(err);
+            if (message !== null) setUsbBanner({ ok: false, text: message || t('Could not remove this book from the device.') });
+          },
+        );
+      },
+      testId: `menu-remove-from-${device.kind}`,
+    });
+  }
   if (me?.role?.edit) {
     menuItems.push({
       id: 'reload-metadata',
@@ -779,20 +811,58 @@ export function BookDetail() {
             {t('Send to e-reader')}
           </button>}
 
-          {inLibrary && kindle.status !== 'unsupported' && !!me?.role?.download && !me.role.anonymous
-            && book.formats.length > 0 && (
-            <button type="button" className={styles.actionSecondary} data-testid="send-to-device"
-              disabled={usbPhase !== null || kindle.status === 'connecting' || !!onKindle}
-              onClick={() => { void sendOverUsb(); }}
-              title={onKindle
-                ? t('This book is already on {name}.', { name: kindle.name || 'your Kindle' })
-                : t('Copy this book to a Kindle connected by USB')}>
-              {onKindle ? (
-                <><Check size={15} aria-hidden="true" focusable={false} />{t('Already on device')}</>
-              ) : (
-                <><Usb size={15} aria-hidden="true" focusable={false} />{usbPhase ?? t('Send to device')}</>
-              )}
-            </button>
+          {inLibrary && !!me?.role?.download && !me.role.anonymous && book.formats.length > 0 && (
+            <>
+              {devices.map((device) => {
+                const entry = device.onDevice(book.id);
+                const name = device.name || device.label;
+                return (
+                  <button key={device.id} type="button" className={styles.actionSecondary}
+                    data-testid={`send-to-device-${device.id}`}
+                    disabled={usbSending !== null || device.status === 'connecting' || !!entry}
+                    onClick={() => {
+                      void sendOverUsb(device.id, async (phase) => {
+                        const r = await device.send(book.id, phase);
+                        return { name: device.name || device.label, format: r.format };
+                      }, device.describeError);
+                    }}
+                    title={entry
+                      ? t('This book is already on {name}.', { name })
+                      : t('Copy this book to a device connected by USB')}>
+                    {entry ? (
+                      <><Check size={15} aria-hidden="true" focusable={false} />{t('Already on device')}</>
+                    ) : (
+                      <><Usb size={15} aria-hidden="true" focusable={false} />
+                        {usbSending?.key === device.id ? usbSending.label
+                          : devices.length > 1 ? t('Send to {name}', { name }) : t('Send to device')}</>
+                    )}
+                  </button>
+                );
+              })}
+              {unconnectedSources.map((source) => {
+                const key = `source:${source.kind}`;
+                return (
+                  <button key={key} type="button" className={styles.actionSecondary}
+                    data-testid={`send-to-device-${source.kind}`}
+                    disabled={usbSending !== null}
+                    onClick={() => {
+                      void sendOverUsb(key, async (phase) => {
+                        phase('connecting');
+                        const device = await source.connect();
+                        if (!device) return null;
+                        const r = await device.send(book.id, phase);
+                        return { name: device.name || device.label, format: r.format };
+                      }, source.describeError);
+                    }}
+                    title={t('Copy this book to a device connected by USB')}>
+                    <Usb size={15} aria-hidden="true" focusable={false} />
+                    {usbSending?.key === key ? usbSending.label
+                      : devices.length + unconnectedSources.length > 1
+                        ? t('Send to {name}', { name: source.label }) : t('Send to device')}
+                  </button>
+                );
+              })}
+            </>
           )}
 
           {/* One visible edit action: Edit metadata for anyone allowed to edit

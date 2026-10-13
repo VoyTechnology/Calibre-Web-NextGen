@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { encodeMtpString, findMtpInterface, sendToKindle, MtpError, KindleConnection, fileExtension } from '../src/lib/kindleUsb.ts';
-import type { UsbDeviceLike } from '../src/lib/kindleUsb.ts';
+import { encodeMtpString, findMtpInterface, sendToKindle, MtpError, KindleConnection, fileExtension } from '../src/lib/device/kindleUsb.ts';
+import type { UsbDeviceLike } from '../src/lib/device/kindleUsb.ts';
 
 const OP = { OpenSession: 0x1002, CloseSession: 0x1003, GetStorageIDs: 0x1004, GetObjectHandles: 0x1007,
-  GetObjectInfo: 0x1008, DeleteObject: 0x100b, SendObjectInfo: 0x100c, SendObject: 0x100d };
+  GetObjectInfo: 0x1008, GetObject: 0x1009, DeleteObject: 0x100b, SendObjectInfo: 0x100c, SendObject: 0x100d };
 
 const cat = (...parts: Uint8Array[]) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -31,7 +31,7 @@ const objectInfo = (name: string, format: number, size: number, parent = 0) => c
   encodeMtpString(name), new Uint8Array([0, 0, 0]));
 
 /** A fake Kindle: root has /documents (handle 7) holding one stale copy of the book (handle 8). */
-function fakeKindle(opts: { existing?: string; extra?: Array<[number, { name: string; format: number; size: number; parent: number }]> } = {}) {
+function fakeKindle(opts: { contents?: Map<number, Uint8Array>; existing?: string; extra?: Array<[number, { name: string; format: number; size: number; parent: number }]> } = {}) {
   const existingName = opts.existing ?? 'Dune - Frank Herbert.azw3';
   const objects = new Map<number, { name: string; format: number; size: number; parent: number }>([
     [7, { name: 'documents', format: 0x3001, size: 0, parent: 0 }],
@@ -71,6 +71,8 @@ function fakeKindle(opts: { existing?: string; extra?: Array<[number, { name: st
     } else if (code === OP.GetObjectInfo) {
       const o = objects.get(p0)!;
       queue.push(container(2, code, tid, objectInfo(o.name, o.format, o.size, o.parent)), container(3, 0x2001, tid));
+    } else if (code === OP.GetObject) {
+      queue.push(container(2, code, tid, opts.contents?.get(p0) ?? new Uint8Array(0)), container(3, 0x2001, tid));
     } else if (code === OP.DeleteObject) { log.deleted.push(p0); objects.delete(p0); queue.push(container(3, 0x2001, tid)); }
   };
 
@@ -213,4 +215,26 @@ test('a failed open releases the interface it claimed', async () => {
 test('file extensions are lower-cased and a name without one is empty', () => {
   assert.equal(fileExtension('Book.AZW3'), 'azw3');
   assert.equal(fileExtension('README'), '');
+});
+
+test('delete removes the file from the Kindle', async () => {
+  const { device, log } = fakeKindle({
+    extra: [[20, { name: 'Loose.azw3', format: 0x3000, size: 5, parent: 7 }]],
+  });
+  const conn = await KindleConnection.open(device);
+  await conn.delete(20);
+  assert.deepEqual(log.deleted, [20]);
+  assert.deepEqual((await conn.listBooks()).map((f) => f.name), ['Dune - Frank Herbert.azw3']);
+  await conn.close();
+});
+
+test('read returns the content of a file on the Kindle, larger than one USB packet', async () => {
+  const bytes = Uint8Array.from({ length: 70_000 }, (_, i) => i % 251);
+  const { device } = fakeKindle({
+    extra: [[20, { name: 'Loose.azw3', format: 0x3000, size: bytes.length, parent: 7 }]],
+    contents: new Map([[20, bytes]]),
+  });
+  const conn = await KindleConnection.open(device);
+  assert.deepEqual(await conn.read(20), bytes);
+  await conn.close();
 });

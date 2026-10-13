@@ -51,7 +51,9 @@
   padding: 0;
 }
 
-.tile { min-width: 0; }
+.tile { min-width: 0; position: relative; }
+.tileMenu { position: absolute; top: var(--sp-2); right: var(--sp-2); z-index: 1; }
+.rowMenu { display: inline-flex; }
 .tileLink { display: flex; flex-direction: column; gap: var(--sp-1); color: inherit; }
 .cover { width: 100%; }  /* BookCover draws its own framed 2:3 tile and no-cover fallback */
 .tileTitle {
@@ -76,4 +78,6 @@
   border: 1px solid var(--border);
   border-radius: var(--r-md);
 }
-.otherName { overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.otherName { overflow-wrap: anywhere; font-size: var(--fs-sm); flex: 1; min-width: 0; }
+.otherRow { align-items: center; flex-wrap: wrap; }
+.otherRow .error { margin: 0; flex-basis: 100%; order: 3; }

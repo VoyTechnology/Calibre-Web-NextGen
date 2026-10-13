@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { useShelves, useMe, useMagicShelves, useUpdateSidebar } from '../lib/queries';
 import { useT } from '../lib/i18n';
-import { useKindleDevice } from '../lib/kindleDevice';
+import { useDevices, isPresent } from '../lib/device';
 import { useIsDrawerMode } from '../lib/a11y/useIsDrawerMode';
 import { useFocusTrap } from '../lib/a11y/useFocusTrap';
 import { useAnnouncer } from '../lib/a11y/announcer';
@@ -111,7 +111,7 @@ export function Sidebar({ open, onClose, onNavigate }: SidebarProps) {
   const [shelvesExpanded, setShelvesExpanded] = usePersistentBool('cwng:shelves-expanded', true);
   const [smartExpanded, setSmartExpanded] = usePersistentBool('cwng:smart-shelves-expanded', true);
   const magicShelves = useMagicShelves().data?.items ?? [];
-  const device = useKindleDevice();
+  const devices = useDevices();
   const me = useMe().data;
   const canEdit = !!me?.role?.edit;
   const isAdmin = !!me?.role?.admin;
@@ -376,47 +376,46 @@ export function Sidebar({ open, onClose, onNavigate }: SidebarProps) {
                   <span>{t(personalLibrary ? 'My Library' : 'Library')}</span>
                 </Link>
               </li>
-              {device.status !== 'unsupported' && device.status !== 'none' && (
-                <li>
-                  <ul className={styles.shelfList} role="list" aria-label={t('Connected device')}>
-                    <li className={styles.sectionHeader} data-testid="sidebar-device">
-                      {device.status === 'connected' ? (
-                        <>
-                          <Link
-                            href="/device"
-                            className={isActive(location, '/device', true) ? styles.shelfItemActive : styles.shelfItem}
-                            aria-current={isActive(location, '/device', true) ? 'page' : undefined}
-                            onClick={onNavigate}
-                            title={device.name}
-                          >
-                            <span className={styles.shelfInitials} aria-hidden="true">{device.name}</span>
-                            <span className={styles.shelfName}>{device.name}</span>
-                            <span className={styles.shelfCount}>{device.entries.length}</span>
+              {devices.filter(isPresent).map((device) => {
+                const href = `/device/${encodeURIComponent(device.id)}`;
+                const active = isActive(location, href, true);
+                const eject = t('Eject {name}', { name: device.name });
+                return (
+                  <li key={device.id}>
+                    <ul className={styles.shelfList} role="list" aria-label={t('Connected device')}>
+                      <li className={styles.sectionHeader} data-testid={`sidebar-device-${device.id}`}>
+                        {device.status === 'connected' ? (
+                          <>
+                            <Link href={href} className={active ? styles.shelfItemActive : styles.shelfItem}
+                              aria-current={active ? 'page' : undefined} onClick={onNavigate} title={device.name}>
+                              <span className={styles.shelfInitials} aria-hidden="true">{device.name}</span>
+                              <span className={styles.shelfName}>{device.name}</span>
+                              <span className={styles.shelfCount}>{device.entries.length}</span>
+                            </Link>
+                            <button type="button" className={styles.sectionControl}
+                              aria-label={eject} title={eject} data-testid={`sidebar-device-${device.id}-eject`}
+                              onClick={() => {
+                                void device.eject().then(() => announce(t('{name} ejected. It is safe to unplug.', { name: device.name })));
+                              }}>
+                              <Unplug size={16} aria-hidden="true" focusable={false} />
+                            </button>
+                          </>
+                        ) : (
+                          <Link href={href} className={styles.shelfItem} onClick={onNavigate}
+                            data-testid={`sidebar-device-${device.id}-state`}>
+                            <span className={styles.shelfInitials} aria-hidden="true">{device.name || device.label}</span>
+                            <span className={styles.shelfName}>
+                              {device.status === 'connecting' ? t('Connecting…')
+                                : device.status === 'ejected' ? t('{name} ejected', { name: device.name || device.label })
+                                : t('{name} not connected', { name: device.label })}
+                            </span>
                           </Link>
-                          <button type="button" className={styles.sectionControl}
-                            aria-label={t('Eject {name}', { name: device.name })}
-                            title={t('Eject {name}', { name: device.name })}
-                            data-testid="sidebar-device-eject"
-                            onClick={() => {
-                              void device.eject().then(() => announce(t('{name} ejected. It is safe to unplug.', { name: device.name })));
-                            }}>
-                            <Unplug size={16} aria-hidden="true" focusable={false} />
-                          </button>
-                        </>
-                      ) : (
-                        <Link href="/device" className={styles.shelfItem} onClick={onNavigate} data-testid="sidebar-device-state">
-                          <span className={styles.shelfInitials} aria-hidden="true">{device.name || 'Kindle'}</span>
-                          <span className={styles.shelfName}>
-                            {device.status === 'connecting' ? t('Connecting…')
-                              : device.status === 'ejected' ? t('{name} ejected', { name: device.name || 'Kindle' })
-                              : t('Kindle not connected')}
-                          </span>
-                        </Link>
-                      )}
-                    </li>
-                  </ul>
-                </li>
-              )}
+                        )}
+                      </li>
+                    </ul>
+                  </li>
+                );
+              })}
               {showGlobalLibrary && (
                 <li>
                   <Link href="/global"

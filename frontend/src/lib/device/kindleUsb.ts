@@ -43,7 +43,7 @@ export const AMAZON_VENDOR_ID = 0x1949;
 
 const OP = {
   OpenSession: 0x1002, CloseSession: 0x1003, GetStorageIDs: 0x1004, GetObjectHandles: 0x1007,
-  GetObjectInfo: 0x1008, SendObjectInfo: 0x100c, SendObject: 0x100d, DeleteObject: 0x100b,
+  GetObjectInfo: 0x1008, GetObject: 0x1009, SendObjectInfo: 0x100c, SendObject: 0x100d, DeleteObject: 0x100b,
 } as const;
 const RC_OK = 0x2001;
 const RC_SESSION_ALREADY_OPEN = 0x201e;
@@ -264,6 +264,12 @@ export class MtpSession {
     return out;
   }
 
+  /** The whole content of one object. */
+  async download(handle: number): Promise<Uint8Array> {
+    const r = await this.transact(OP.GetObject, [handle]);
+    return r.data ?? new Uint8Array(0);
+  }
+
   async remove(handle: number): Promise<void> {
     await this.transact(OP.DeleteObject, [handle, 0]);
   }
@@ -292,11 +298,16 @@ function usbApi(): UsbApi {
   return (navigator as unknown as { usb: UsbApi }).usb;
 }
 
-/** A remembered Kindle when exactly one was already granted, otherwise the browser's chooser.
- *  The chooser needs a user gesture, so call this first in the click handler. */
-export async function pickKindle(): Promise<UsbDeviceLike> {
-  const granted = (await usbApi().getDevices()).filter((d) => d.vendorId === AMAZON_VENDOR_ID);
-  if (granted.length === 1) return granted[0];
+/** Kindles the browser already has permission for. */
+export async function grantedKindles(): Promise<UsbDeviceLike[]> {
+  return (await usbApi().getDevices()).filter((d) => d.vendorId === AMAZON_VENDOR_ID);
+}
+
+/** A remembered Kindle when exactly one is granted and not skipped (already connected), otherwise the
+ *  browser's chooser. The chooser needs a user gesture, so call this first in the click handler. */
+export async function pickKindle(skip: (device: UsbDeviceLike) => boolean = () => false): Promise<UsbDeviceLike> {
+  const candidates = (await grantedKindles()).filter((d) => !skip(d));
+  if (candidates.length === 1) return candidates[0];
   return usbApi().requestDevice({ filters: [{ vendorId: AMAZON_VENDOR_ID }] });
 }
 
@@ -404,6 +415,16 @@ export class KindleConnection {
       await walk(this.docs, '', 0);
       return out;
     });
+  }
+
+  /** The bytes of a file found by listBooks(). */
+  read(handle: number): Promise<Uint8Array> {
+    return this.run(() => this.session.download(handle));
+  }
+
+  /** Delete a file found by listBooks(). Its .sdr sidecar folder (reading position, notes) is left to the Kindle. */
+  delete(handle: number): Promise<void> {
+    return this.run(() => this.session.remove(handle));
   }
 
   /** Write a book into documents/, replacing an earlier copy of the same name. */

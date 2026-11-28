@@ -226,10 +226,11 @@ export function useKindleDevices(ownerId: number | undefined): { devices: Connec
     patch(id, { busy: 'Sending…' });
     try {
       onPhase?.('preparing');
+      const signal = access.controller.signal;
       const plan = await apiPost<{ format: string; converted: boolean; filename: string; download_url: string }>(
-        `/api/v1/books/${bookId}/kindle-usb`, {});
+        `/api/v1/books/${bookId}/kindle-usb`, { kindle_owner_id: access.ownerId }, { signal });
       onPhase?.('downloading');
-      const response = await fetch(resourceUrl(plan.download_url), { credentials: 'same-origin' });
+      const response = await fetch(resourceUrl(plan.download_url), { credentials: 'same-origin', signal });
       if (!response.ok || response.headers.get('Content-Type')?.startsWith('text/html')) {
         throw new Error(`Could not download the Kindle book (${response.status}).`);
       }

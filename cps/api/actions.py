@@ -656,6 +656,13 @@ def prepare_kindle_usb(book_id):
     if guard:
         return guard
 
+    body = request.get_json(silent=True)
+    owner_id = body.get("kindle_owner_id") if isinstance(body, dict) else None
+    if type(owner_id) is not int:
+        return _err("invalid_request", "A Kindle account ID is required", 400)
+    if owner_id != current_user.id:
+        return _err("kindle_account_changed", "The account changed before Kindle preparation", 409)
+
     book = calibre_db.get_filtered_book(book_id, allow_show_archived=True)
     if book is None:
         return _err("not_found", "Book not found", 404)

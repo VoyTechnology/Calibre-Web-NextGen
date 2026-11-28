@@ -17,6 +17,7 @@ export interface UsbAlternateInfo { alternateSetting: number; interfaceClass: nu
 export interface UsbInterfaceInfo { interfaceNumber: number; alternates: UsbAlternateInfo[] }
 export interface UsbConfigInfo { configurationValue: number; interfaces: UsbInterfaceInfo[] }
 export interface UsbTransferResult { status: 'ok' | 'stall' | 'babble'; data?: DataView }
+export interface UsbOutTransferResult { status: UsbTransferResult['status']; bytesWritten: number }
 export interface UsbDeviceLike {
   vendorId: number;
   productName?: string | null;
@@ -31,7 +32,7 @@ export interface UsbDeviceLike {
   releaseInterface(n: number): Promise<void>;
   selectAlternateInterface(n: number, alt: number): Promise<void>;
   transferIn(endpoint: number, length: number): Promise<UsbTransferResult>;
-  transferOut(endpoint: number, data: Uint8Array): Promise<unknown>;
+  transferOut(endpoint: number, data: Uint8Array): Promise<UsbOutTransferResult>;
   clearHalt(direction: 'in' | 'out', endpoint: number): Promise<void>;
 }
 interface UsbApi {
@@ -76,6 +77,7 @@ const OP = {
   OpenSession: 0x1002, CloseSession: 0x1003, GetStorageIDs: 0x1004, GetObjectHandles: 0x1007,
   GetObjectInfo: 0x1008, GetObject: 0x1009, SendObjectInfo: 0x100c, SendObject: 0x100d, DeleteObject: 0x100b,
 } as const;
+const USB_TRANSFER_TIMEOUT_MS = 30_000;
 const RC_OK = 0x2001;
 const RC_SESSION_ALREADY_OPEN = 0x201e;
 const FMT_UNDEFINED = 0x3000;
@@ -160,6 +162,7 @@ export class MtpSession {
   private buffer: Uint8Array = new Uint8Array(0);
   private transactionId = 0;
   private sessionOpen = false;
+  private transferFailure: Error | null = null;
 
   constructor(device: MtpSession['device'], iface: MtpSession['iface']) {
     this.device = device;
@@ -178,25 +181,61 @@ export class MtpSession {
     return out;
   }
 
+  private async transfer<T>(operate: () => Promise<T>): Promise<T> {
+    if (this.transferFailure) throw this.transferFailure;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new MtpError('USB transfer timed out', 0)), USB_TRANSFER_TIMEOUT_MS);
+      });
+      return await Promise.race([operate(), deadline]);
+    } catch (error) {
+      this.transferFailure = error instanceof Error ? error : new MtpError('USB transfer failed', 0);
+      throw this.transferFailure;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private failTransfer(message: string): never {
+    // A partial transaction can leave bytes on the endpoint. Only release
+    // the USB claim on close, as another MTP command cannot safely follow.
+    this.transferFailure = new MtpError(message, 0);
+    throw this.transferFailure;
+  }
+
+  private async writePacket(bytes: Uint8Array): Promise<void> {
+    const result = await this.transfer(() => this.device.transferOut(this.iface.epOut, bytes));
+    if (result.status !== 'ok' || result.bytesWritten !== bytes.length) {
+      this.failTransfer('USB write incomplete');
+    }
+  }
+
   private async write(u8: Uint8Array): Promise<void> {
     const CHUNK = 1 << 20;
     for (let o = 0; o < u8.length; o += CHUNK) {
-      await this.device.transferOut(this.iface.epOut, u8.subarray(o, o + CHUNK));
+      await this.writePacket(u8.subarray(o, o + CHUNK));
     }
     // A transfer ending exactly on a packet boundary is closed with a zero-length packet.
     if (u8.length % this.iface.packetSize === 0) {
-      await this.device.transferOut(this.iface.epOut, new Uint8Array(0));
+      await this.writePacket(new Uint8Array(0));
     }
   }
 
   private async fill(n: number): Promise<void> {
+    let readWithoutProgress = false;
     while (this.buffer.length < n) {
-      const r = await this.device.transferIn(this.iface.epIn, 65536);
-      if (r.status === 'stall') {
-        await this.device.clearHalt('in', this.iface.epIn);
+      const r = await this.transfer(() => this.device.transferIn(this.iface.epIn, 65536));
+      if (r.status === 'babble') this.failTransfer('USB read overflow');
+      if (r.status === 'stall' || !r.data?.byteLength) {
+        if (readWithoutProgress) this.failTransfer(r.status === 'stall' ? 'USB read stalled' : 'USB read made no progress');
+        readWithoutProgress = true;
+        if (r.status === 'stall') {
+          await this.transfer(() => this.device.clearHalt('in', this.iface.epIn));
+        }
         continue;
       }
-      if (!r.data) continue;
+      readWithoutProgress = false;
       const chunk = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
       const grown = new Uint8Array(this.buffer.length + chunk.length);
       grown.set(this.buffer);

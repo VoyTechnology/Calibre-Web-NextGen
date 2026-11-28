@@ -23,7 +23,7 @@ def _book(formats, title="Dune", authors=("Frank Herbert",)):
                            authors=[SimpleNamespace(name=a) for a in authors])
 
 
-def _call(book, *, converter="/usr/bin/ebook-convert", convert_result=None, user=None, enabled=True):
+def _call(book, *, converter="/usr/bin/ebook-convert", convert_result=None, user=None, enabled=True, payload=None):
     from cps import app
     from cps.api import actions as mod
     db = MagicMock()
@@ -31,7 +31,9 @@ def _call(book, *, converter="/usr/bin/ebook-convert", convert_result=None, user
     db.get_book_format.side_effect = lambda _id, fmt: SimpleNamespace(name="Dune - Frank Herbert", format=fmt)
     cfg = SimpleNamespace(config_kindle_usb_enabled=enabled, config_converterpath=converter,
                           get_book_path=lambda: "/books")
-    with app.test_request_context("/api/v1/books/5/kindle-usb", method="POST"):
+    if payload is None:
+        payload = {"kindle_owner_id": 1}
+    with app.test_request_context("/api/v1/books/5/kindle-usb", method="POST", json=payload):
         with patch.object(mod, "current_user", user or _user()), \
              patch.object(mod, "calibre_db", db), \
              patch.object(mod, "config", cfg), \
@@ -75,6 +77,14 @@ def test_existing_azw3_is_returned_without_converting():
     body = _body(resp)
     assert body == {"format": "AZW3", "converted": False, "filename": "Dune - Frank Herbert.azw3",
                     "download_url": "/download/5/azw3"}
+    convert.assert_not_called()
+
+
+@pytest.mark.unit
+def test_prepare_requires_an_account_before_converting():
+    resp, convert = _call(_book(["EPUB"]), payload={})
+    assert (resp[1] if isinstance(resp, tuple) else resp.status_code) == 400
+    assert _body(resp)["error"]["code"] == "invalid_request"
     convert.assert_not_called()
 
 

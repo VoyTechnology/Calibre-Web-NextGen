@@ -94,9 +94,9 @@ function fakeKindle(opts: { contents?: Map<number, Uint8Array>; existing?: strin
     async selectAlternateInterface() {},
     async clearHalt() {},
     async transferOut(_ep, data) {
-      if (data.length === 0) { log.zlp++; return {}; }
+      if (data.length === 0) log.zlp++;
       if (data.length >= 12) respond(data);
-      return {};
+      return { status: 'ok', bytesWritten: data.length };
     },
     async transferIn() {
       const next = queue.shift();
@@ -349,6 +349,60 @@ test('close finishes an active transfer and blocks queued file deletion', async 
   await close;
   await rejection;
   assert.deepEqual(log.deleted, []);
+});
+
+test('a short USB write interrupts send and a close releases the claim', async () => {
+  const { device, log } = fakeKindle();
+  const conn = await KindleConnection.open(device);
+  const transfer = device.transferOut.bind(device);
+  device.transferOut = async (endpoint, data) => {
+    const packet = new DataView(data.buffer, data.byteOffset);
+    if (data.length >= 12 && packet.getUint16(4, true) === 2 && packet.getUint16(6, true) === OP.SendObject) {
+      // A resolved WebUSB transfer can be shorter than requested.
+      await transfer(endpoint, data);
+      return { status: 'ok', bytesWritten: data.length - 1 };
+    }
+    return transfer(endpoint, data);
+  };
+
+  await assert.rejects(conn.send('Incomplete.azw3', new Uint8Array(5)), /USB write incomplete/);
+  await assert.rejects(conn.close(), /USB write incomplete/);
+  assert.deepEqual(log.released, [0]);
+  assert.equal(log.closed, true);
+});
+
+test('repeated USB stalls end a read and a close releases the claim', async () => {
+  const { device, log } = fakeKindle();
+  const conn = await KindleConnection.open(device);
+  let attempts = 0;
+  device.transferIn = async () => {
+    assert.ok(++attempts <= 5, 'the transport must stop retrying without a board response');
+    return { status: 'stall' };
+  };
+
+  await assert.rejects(conn.listBooks(), /USB read stalled/);
+  await assert.rejects(conn.close(), /USB read stalled/);
+  assert.deepEqual(log.released, [0]);
+  assert.equal(log.closed, true);
+});
+
+test('a USB transfer that never settles times out before close releases the claim', async (t) => {
+  const { device, log } = fakeKindle();
+  const conn = await KindleConnection.open(device);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signalStarted!: () => void;
+  const started = new Promise<void>(resolve => { signalStarted = resolve; });
+  device.transferIn = () => {
+    signalStarted();
+    return new Promise(() => {});
+  };
+  const read = assert.rejects(conn.listBooks(), /USB transfer timed out/);
+  await started;
+  const close = assert.rejects(conn.close(), /USB transfer timed out/);
+  t.mock.timers.tick(60_000);
+  await Promise.all([read, close]);
+  assert.deepEqual(log.released, [0]);
+  assert.equal(log.closed, true);
 });
 
 test('closing during device inspection prevents the first mutating command', async () => {

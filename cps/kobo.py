@@ -1461,6 +1461,7 @@ def _sync_observability(
     share_place_mode=None,
     withheld_box_off=0,
     withheld_own_newer=0,
+    candidates_ahead=None,
 ):
     counts = _sync_entitlement_counts(sync_results)
     return {
@@ -1480,6 +1481,12 @@ def _sync_observability(
         "share_place_mode": share_place_mode or "none",
         "withheld_box_off": int(withheld_box_off),
         "withheld_own_newer": int(withheld_own_newer),
+        # Books in this account's Kobo scope still ahead of the incoming
+        # cursor, this page included.  Books the Kobo already holds are in it
+        # and get skipped, so it bounds the walk rather than counting what the
+        # device will receive.
+        "candidates_ahead": (
+            None if candidates_ahead is None else int(candidates_ahead)),
     }
 
 
@@ -1511,7 +1518,12 @@ def _empty_sync_observability():
         "share_place_mode": "none",
         "withheld_box_off": 0,
         "withheld_own_newer": 0,
+        "candidates_ahead": None,
     }
+
+
+def _format_candidates_ahead(value):
+    return "n/a" if value is None else str(int(value))
 
 
 def _format_reemit_reasons(reasons):
@@ -1533,6 +1545,10 @@ def _log_sync_observability(
     capture_session=None,
 ):
     """Emit the PII-free one-line incident record for one response attempt."""
+    if response_mode not in {"new_page", "delivered_page_not_durable"}:
+        # A replay can carry a snapshot built for an earlier incoming cursor.
+        # An error sends no page. Neither has a count for the current page.
+        observability = {**observability, "candidates_ahead": None}
     incoming_cursor_log = None
     outgoing_cursor_log = None
     try:
@@ -1547,6 +1563,7 @@ def _log_sync_observability(
             "reemit_reasons=%s reseeded_shape_change=%d "
             "replay_suppression enabled=%s eligible=%s "
             "share_place mode=%s withheld box_off=%d own_newer=%d "
+            "candidates_ahead=%s "
             "cursors in=%s out=%s",
             _sync_device_log_id(requesting_device_id),
             capture_id,
@@ -1565,6 +1582,7 @@ def _log_sync_observability(
             observability.get("share_place_mode", "none"),
             observability.get("withheld_box_off", 0),
             observability.get("withheld_own_newer", 0),
+            _format_candidates_ahead(observability.get("candidates_ahead")),
             incoming_cursor_log,
             outgoing_cursor_log,
         )
@@ -3640,6 +3658,7 @@ def HandleSyncRequest():
         share_place_mode=sync_place_mode,
         withheld_box_off=len(withheld_box_off),
         withheld_own_newer=len(withheld_own_newer),
+        candidates_ahead=book_count,
     )
 
     if requesting_device_id:
@@ -5936,6 +5955,20 @@ def HandleProductsRequest(dummy=None):
     return redirect_or_proxy_request()
 
 
+# Any other store call. The Kobo sends its storeapi.kobo.com calls to CWNG, so a
+# store path with no route above got Flask's 404, which Libby shows as "Network
+# Error" (#2962). It goes to the store like the others. Every route above wins
+# over this one; only a path no other route matches lands here.
+@csrf.exempt
+@kobo.route("/v1/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@kobo.route("/v2/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+def HandleUnknownStoreRequest(subpath=None):
+    log.debug("Unknown Kobo Store request received: %s %s (%s)",
+              request.method, urlsplit(get_store_url_for_current_request()).path,
+              'forwarded to Kobo Store' if config.config_kobo_proxy else 'returning empty response')
+    return redirect_or_proxy_request()
+
+
 def _store_error_code(store_response):
     try:
         status = store_response.json().get("ResponseStatus") or {}
@@ -6042,13 +6075,31 @@ def HandleAuthRequest():
 
 
 
+def _kobo_direct_origin():
+    """Use the configured external port when there is no reverse proxy."""
+    host = request.host
+    if ':' in host and not host.endswith(']'):
+        host = host.rsplit(':', 1)[0]
+    return f"{request.scheme}://{host}:{config.config_external_port}"
+
+
+def _kobo_oauth_base_url():
+    # Some Kobos omit the port in Host. With the store proxy off, the local
+    # OAuth URLs need the same external port as the rest of the sync URLs.
+    use_request_origin = config.config_kobo_proxy or current_app.wsgi_app.is_proxied
+    oauth_url = url_for("kobo.HandleOauthRequest",
+                        auth_token=kobo_auth.get_auth_token(),
+                        _external=use_request_origin)
+    if not use_request_origin:
+        oauth_url = _kobo_direct_origin() + oauth_url
+    return oauth_url.rsplit("/oauth", 1)[0]
+
+
 @csrf.exempt
 @kobo.route('/oauth/.well-known/openid-configuration', methods=['GET', 'POST'])
 @requires_kobo_auth
 def HandleOidcDiscovery():
-    base_url = url_for("kobo.HandleOauthRequest",
-                       auth_token=get_auth_token(),
-                       _external=True).rsplit("/oauth", 1)[0]
+    base_url = _kobo_oauth_base_url()
     payload = {
         'issuer': base_url,
         'authorization_endpoint': base_url + '/oauth/authorize',
@@ -6120,15 +6171,7 @@ def HandleInitRequest():
 
     if not current_app.wsgi_app.is_proxied:
         log.debug('Kobo: Received unproxied request, changed request port to external server port')
-        if ':' in request.host and not request.host.endswith(']'):
-            host = "".join(request.host.split(':')[:-1])
-        else:
-            host = request.host
-        calibre_web_url = "{url_scheme}://{url_base}:{url_port}".format(
-            url_scheme=request.scheme,
-            url_base=host,
-            url_port=config.config_external_port
-        )
+        calibre_web_url = _kobo_direct_origin()
         log.debug('Kobo: Received unproxied request, changed request url to %s', calibre_web_url)
         kobo_resources["image_host"] = calibre_web_url
         kobo_resources["image_url_quality_template"] = unquote(calibre_web_url +
@@ -6190,13 +6233,9 @@ def HandleInitRequest():
                                                   _external=True)
         kobo_resources["rating"] = _rating_resource_url()
 
-    # When not proxying Kobo Store requests, point oauth_host to CWA and
-    # serve dummy OAuth responses for unregistered devices.
+    # Point devices at local OAuth when they aren't using the Kobo Store.
     if not config.config_kobo_proxy:
-        oauth_token_url = url_for("kobo.HandleOauthRequest",
-                                  auth_token=kobo_auth.get_auth_token(),
-                                  _external=True)
-        kobo_resources["oauth_host"] = oauth_token_url.rsplit("/oauth", 1)[0] + "/oauth"
+        kobo_resources["oauth_host"] = _kobo_oauth_base_url() + "/oauth"
 
     response = make_response(jsonify({"Resources": kobo_resources}))
     response.headers["x-kobo-apitoken"] = "e30="

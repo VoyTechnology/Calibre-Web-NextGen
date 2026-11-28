@@ -43,6 +43,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Dict, Optional, Any, Tuple
 from urllib.parse import quote
 
@@ -56,7 +57,8 @@ from ...kobo import push_reading_state_to_hardcover
 from flask import Blueprint, g, has_request_context, request, jsonify, send_from_directory
 from flask_babel import gettext as _
 from werkzeug.security import check_password_hash
-from sqlalchemy import func, desc, cast, select, String
+from sqlalchemy import func, desc, cast, literal_column, select, String, text as sql_text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError, OperationalError, InvalidRequestError
 from werkzeug.exceptions import BadRequest, HTTPException
 
@@ -92,6 +94,7 @@ MAX_DEVICE_LENGTH = 100    # Maximum device name length
 MAX_DEVICE_ID_LENGTH = 100 # Maximum device ID length
 MAX_INVENTORY_BYTES = 2 * 1024 * 1024
 MAX_INVENTORY_ITEMS = 5000
+INVENTORY_CHECKSUM_BATCH = 500  # Below SQLite's legacy 999 bind parameter limit.
 MAX_INVENTORY_PATH_LENGTH = 1024
 MAX_DELIVERY_BYTES = 64 * 1024
 _CHECKSUM_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -510,77 +513,138 @@ def handle_sync_error(error: KOSyncError) -> tuple:
     }, status)
 
 
-# Issue #1190: a device stuck on an unknown checksum polls repeatedly, and one
-# inventory PUT can carry thousands of unmatched files, so the extra detail on
-# a lookup miss is budgeted per interval: each checksum is diagnosed at most
-# once per window, at most _MISS_DIAG_MAX_TRACKED checksums are diagnosed per
-# window, and the library-wide count is taken once per window. The plain
-# "No book found" line is still logged every time.
+# Issue #1190: a device stuck on an unknown checksum polls repeatedly. Keep
+# detailed diagnoses bounded per process and reserve fewer slots for full table
+# scans (#2960). Inventory lookups do not use these diagnostics.
 _MISS_DIAG_INTERVAL = 300.0
 _MISS_DIAG_MAX_TRACKED = 256
-_miss_diag_last: Dict[str, float] = {}
-_miss_diag_window = {"start": None, "total": None}
+_MISS_DIAG_MAX_SCANS = 4
+_miss_diag_lock = Lock()
+_miss_diag_last: set[tuple[str, str | None]] = set()
+_miss_diag_window = {"start": None, "total": None, "scans": 0, "damage_warned": False}
+
+
+def _checksum_lookup_query(checksum, version):
+    from ...db import BookFormatChecksum, Books
+
+    checksums = BookFormatChecksum.__table__
+    books = Books.__table__
+    query = select(
+        checksums.c.book,
+        checksums.c.format,
+        checksums.c.version,
+        books.c.title,
+        books.c.path,
+    ).join(
+        books, checksums.c.book == books.c.id,
+    ).where(
+        checksums.c.checksum == checksum,
+    )
+    if version is not None:
+        query = query.where(checksums.c.version == version)
+    return query.order_by(checksums.c.created.desc(), checksums.c.version.desc()).limit(1)
+
+def _probe_checksum_index(session, checksum, version):
+    # Compare the same ordered lookup with an unindexed read in one SQLite
+    # snapshot. A bare EXISTS can choose a different, healthy covering index.
+    indexed_lookup = _checksum_lookup_query(checksum, version).subquery()
+    indexed_book = select(indexed_lookup.c.book).scalar_subquery()
+    scan = select(
+        literal_column("candidate.book"),
+        literal_column("candidate.format"),
+        literal_column("live_book.id"),
+        indexed_book.is_not(None),
+    ).select_from(sql_text(
+        "book_format_checksums AS candidate NOT INDEXED "
+        "LEFT JOIN books AS live_book ON live_book.id = candidate.book"
+    )).where(sql_text("candidate.checksum = :checksum"))
+    if version is not None:
+        scan = scan.where(sql_text("candidate.version = :version"))
+    scan = scan.order_by(sql_text(
+        "(live_book.id IS NOT NULL) DESC, candidate.created DESC, candidate.version DESC"
+    )).limit(1)
+    return session.execute(scan, {"checksum": checksum, "version": version}).first()
 
 
 def _describe_checksum_miss(document_checksum: str, version: str = None) -> str:
-    """Say why a checksum lookup missed, or return "" when not diagnosing.
-
-    Three different causes produce the same miss and need different answers
-    from the admin (#1190):
-
-    * a ``book_format_checksums`` row exists but its book id is not in
-      ``books`` (stale id, e.g. after a Calibre database rebuild);
-    * no checksums are registered at all (the backfill never ran, or
-      registration is failing);
-    * checksums exist but not this one (the device holds a file the server
-      never served, or whose bytes changed after it was registered).
-
-    Read-only, and never raises: diagnostics must not turn a clean miss into
-    an error.
-    """
-    now = time.monotonic()
-    started = _miss_diag_window["start"]
-    if started is None or now - started >= _MISS_DIAG_INTERVAL:
-        _miss_diag_last.clear()
-        _miss_diag_window["start"] = now
-        _miss_diag_window["total"] = None
-    if document_checksum in _miss_diag_last:
-        return ""
-    if len(_miss_diag_last) >= _MISS_DIAG_MAX_TRACKED:
-        return ""
-    _miss_diag_last[document_checksum] = now
+    """Explain a lookup miss without changing its result or the database."""
+    with _miss_diag_lock:
+        now = time.monotonic()
+        started = _miss_diag_window["start"]
+        if started is None or now - started >= _MISS_DIAG_INTERVAL:
+            _miss_diag_last.clear()
+            started = now
+            _miss_diag_window.update(start=started, total=None, scans=0, damage_warned=False)
+        key = (document_checksum, version)
+        if key in _miss_diag_last or len(_miss_diag_last) >= _MISS_DIAG_MAX_TRACKED:
+            return ""
+        _miss_diag_last.add(key)
+        can_scan = _miss_diag_window["scans"] < _MISS_DIAG_MAX_SCANS
+        if can_scan:
+            _miss_diag_window["scans"] += 1
 
     try:
         from ... import calibre_db
         from ...db import BookFormatChecksum, Books
 
-        stale = calibre_db.session.query(
-            BookFormatChecksum.book, BookFormatChecksum.format
-        ).outerjoin(
-            Books, BookFormatChecksum.book == Books.id
-        ).filter(
-            BookFormatChecksum.checksum == document_checksum,
-            Books.id.is_(None),
-        )
-        if version is not None:
-            stale = stale.filter(BookFormatChecksum.version == version)
-        stale = stale.order_by(
-            BookFormatChecksum.created.desc(), BookFormatChecksum.version.desc()
-        ).first()
+        session = calibre_db.session
+        probe = _probe_checksum_index(session, document_checksum, version) if can_scan else None
+        if probe and probe[2] is not None:
+            book_id, book_format, _, indexed_match = probe
+            if indexed_match:
+                return "a matching checksum is visible now; retry the lookup"
+            with _miss_diag_lock:
+                warn = _miss_diag_window["start"] == started and not _miss_diag_window["damage_warned"]
+                if warn:
+                    _miss_diag_window["damage_warned"] = True
+            if warn:
+                log.warning(
+                    "KOReader sync: checksum index may be damaged: a row for book id %s (%s) "
+                    "and checksum %s is visible without the index. Stop writes and run "
+                    "PRAGMA integrity_check on a consistent copy of the library's metadata.db",
+                    book_id, book_format, document_checksum,
+                )
+            return (
+                "the checksum row for book id %s (%s) is visible without the index; "
+                "the checksum index may be damaged. Run PRAGMA integrity_check on "
+                "a consistent copy of the library's metadata.db"
+                % (book_id, book_format)
+            )
+
+        # If no scan ran or returned a hit, keep the existing cheap stale-id
+        # diagnostic for rows that are still visible through the index.
+        stale = probe
+        if stale is None:
+            query = session.query(
+                BookFormatChecksum.book, BookFormatChecksum.format,
+            ).outerjoin(
+                Books, BookFormatChecksum.book == Books.id,
+            ).filter(
+                BookFormatChecksum.checksum == document_checksum,
+                Books.id.is_(None),
+            )
+            if version is not None:
+                query = query.filter(BookFormatChecksum.version == version)
+            stale = query.order_by(
+                BookFormatChecksum.created.desc(), BookFormatChecksum.version.desc(),
+            ).first()
         if stale:
             return (
-                "a checksum row exists for book id %s (%s) but that book is not "
+                "book id %s (%s) was registered for this checksum but no longer exists "
                 "in the library; the id is stale, e.g. after a Calibre database "
                 "rebuild" % (stale[0], stale[1])
             )
-        total = _miss_diag_window["total"]
+        with _miss_diag_lock:
+            total = _miss_diag_window["total"] if _miss_diag_window["start"] == started else None
         if total is None:
-            total = calibre_db.session.query(
+            total = session.query(
                 func.count(BookFormatChecksum.id)
             ).scalar() or 0
             if total:
                 # An empty table may be a backfill still running; recount.
-                _miss_diag_window["total"] = total
+                with _miss_diag_lock:
+                    if _miss_diag_window["start"] == started:
+                        _miss_diag_window["total"] = total
         if total == 0:
             return (
                 "no checksums are registered library-wide; the checksum "
@@ -595,7 +659,7 @@ def _describe_checksum_miss(document_checksum: str, version: str = None) -> str:
         return "diagnostics unavailable (%s)" % type(e).__name__
 
 
-def get_book_by_checksum(document_checksum: str, version: str = None):
+def get_book_by_checksum(document_checksum: str, version: str = None, *, diagnose_miss: bool = True):
     """
     Lookup a book in the Calibre library by its partial MD5 checksum.
 
@@ -605,6 +669,7 @@ def get_book_by_checksum(document_checksum: str, version: str = None):
     Args:
         document_checksum: The partial MD5 checksum from KOReader
         version: Optional algorithm version to filter by (None = any version)
+        diagnose_miss: Enable detailed diagnostic queries for a single lookup
 
     Returns:
         Tuple of (book_id, book_format, book_title, book_path, version) or
@@ -615,32 +680,9 @@ def get_book_by_checksum(document_checksum: str, version: str = None):
         Orders by created DESC (latest first), then version DESC.
     """
     from ... import calibre_db
-    from ...db import BookFormatChecksum, Books
 
     try:
-        query = calibre_db.session.query(
-            BookFormatChecksum.book,
-            BookFormatChecksum.format,
-            BookFormatChecksum.version,
-            Books.title,
-            Books.path
-        ).join(
-            Books, BookFormatChecksum.book == Books.id
-        ).filter(
-            BookFormatChecksum.checksum == document_checksum
-        )
-
-        # Optionally filter by version
-        if version is not None:
-            query = query.filter(BookFormatChecksum.version == version)
-
-        # Order by created DESC (latest first), then version DESC
-        query = query.order_by(
-            BookFormatChecksum.created.desc(),
-            BookFormatChecksum.version.desc()
-        )
-
-        result = query.first()
+        result = calibre_db.session.execute(_checksum_lookup_query(document_checksum, version)).first()
 
         if result:
             book_id, book_format, checksum_version, book_title, book_path = result
@@ -653,7 +695,7 @@ def get_book_by_checksum(document_checksum: str, version: str = None):
         # CWA, my device pushes a checksum, nothing happens" — the
         # checksum is in the message so the admin can grep the
         # book_format_checksums table for it.
-        detail = _describe_checksum_miss(document_checksum, version)
+        detail = _describe_checksum_miss(document_checksum, version) if diagnose_miss else ""
         log.info(
             "KOReader sync: No book found for checksum: %s%s",
             document_checksum, " (%s)" % detail if detail else "",
@@ -1393,7 +1435,7 @@ def get_progress(document: str):
         Percentage is returned as decimal (0.4567 = 45.67%) as expected by KOReader.
         Internally stored as percentage (0-100) in database.
     """
-    endpoint = f"GET /kosync/syncs/progress/{document}"
+    endpoint = "GET /kosync/syncs/progress/<document>"
     log.debug(endpoint)
     try:
         blocked = _require_kosync_enabled()
@@ -1505,7 +1547,7 @@ def get_progress(document: str):
             if anchor:
                 response_data["anchor"] = anchor
 
-        log.debug(endpoint + f" Response: {response_data}")
+        log.debug("%s response sent", endpoint)
 
         return create_sync_response(response_data)
 
@@ -1559,6 +1601,33 @@ def _validate_inventory_entry(entry):
         "size": size,
         "mtime": mtime,
     }
+
+
+def _inventory_book_ids(entries):
+    """Resolve distinct checksums using the same history order as progress sync."""
+    from ... import calibre_db
+    from ...db import BookFormatChecksum, Books
+
+    checksums = list(dict.fromkeys(entry["checksum"] for entry in entries))
+    matches = {}
+    session = getattr(calibre_db, "session", None)
+    if not checksums or session is None:
+        return matches
+    for start in range(0, len(checksums), INVENTORY_CHECKSUM_BATCH):
+        batch = checksums[start:start + INVENTORY_CHECKSUM_BATCH]
+        rows = session.query(
+            BookFormatChecksum.checksum, BookFormatChecksum.book
+        ).join(Books, Books.id == BookFormatChecksum.book).filter(
+            BookFormatChecksum.checksum.in_(batch)
+        ).order_by(BookFormatChecksum.created.desc(), BookFormatChecksum.version.desc())
+        try:
+            for checksum, book_id in rows:
+                matches.setdefault(checksum, book_id)
+        except SQLAlchemyError:
+            # Inventory also tracks sideloads. As in the single-file lookup,
+            # an unavailable metadata DB must not discard the device report.
+            log.warning("KOReader inventory checksum lookup failed", exc_info=True)
+    return matches
 
 
 @csrf.exempt
@@ -1663,48 +1732,36 @@ def update_inventory():
             )
 
         now = datetime.now(timezone.utc)
-        resolved = []
-        matched_count = 0
-        for entry in normalized:
-            book_id, _fmt, _title, _path, _version = get_book_by_checksum(entry["checksum"])
-            if book_id is not None:
-                matched_count += 1
-            resolved.append((entry, book_id))
+        book_ids = _inventory_book_ids(normalized)
+        matched_count = sum(entry["checksum"] in book_ids for entry in normalized)
 
         report = ub.DeviceInventoryReport(
             device_id=device.id,
             observed_at=now,
-            item_count=len(resolved),
+            item_count=len(normalized),
             matched_count=matched_count,
         )
         ub.session.add(report)
         ub.session.flush()
 
-        for entry, book_id in resolved:
-            item = ub.session.query(ub.DeviceInventoryItem).filter_by(
-                device_id=device.id,
-                lpath=entry["lpath"],
-                checksum=entry["checksum"],
-            ).one_or_none()
-            if item is None:
-                item = ub.DeviceInventoryItem(
-                    device_id=device.id,
-                    lpath=entry["lpath"],
-                    checksum=entry["checksum"],
-                    first_seen_at=now,
-                )
-                ub.session.add(item)
-            item.book_id = book_id
-            item.size = entry["size"]
-            item.mtime = entry["mtime"]
-            item.last_seen_at = now
-            item.last_report_id = report.id
+        if normalized:
+            insert = sqlite_insert(ub.DeviceInventoryItem.__table__)
+            upsert = insert.on_conflict_do_update(
+                index_elements=["device_id", "lpath", "checksum"],
+                set_={key: insert.excluded[key] for key in
+                      ("book_id", "size", "mtime", "last_seen_at", "last_report_id")},
+            )
+            ub.session.execute(upsert, [
+                dict(entry, device_id=device.id, book_id=book_ids.get(entry["checksum"]),
+                     first_seen_at=now, last_seen_at=now, last_report_id=report.id)
+                for entry in normalized
+            ])
 
         ub.session.commit()
         return create_sync_response({
-            "accepted": len(resolved),
+            "accepted": len(normalized),
             "matched": matched_count,
-            "unmatched": len(resolved) - matched_count,
+            "unmatched": len(normalized) - matched_count,
             "report_id": report.id,
             "device": device.public_id,
         })
@@ -2485,7 +2542,8 @@ def update_progress():
     Note:
         Percentage is converted from decimal (0.9411 = 94.11%) to percentage (94.11).
     """
-    endpoint = f"PUT /kosync/syncs/progress/<document> with: {request.get_json()}"
+    data = request.get_json()
+    endpoint = "PUT /kosync/syncs/progress/<document>"
     log.debug(endpoint)
     try:
         blocked = _require_kosync_enabled()
@@ -2496,7 +2554,6 @@ def update_progress():
         if not user:
             raise KOSyncError(ERROR_UNAUTHORIZED_USER, "Unauthorized")
 
-        data = request.get_json()
         if not data:
             raise KOSyncError(ERROR_INVALID_FIELDS, "Invalid request data")
 
@@ -2833,7 +2890,7 @@ def update_progress():
                 log.error(f"Unexpected error updating ReadBook status for book {book_id}: {e}")
                 ub.session.rollback()
 
-        log.debug(endpoint + f" Response: {response_data}")
+        log.debug("%s response sent", endpoint)
 
         return create_sync_response(response_data)
 

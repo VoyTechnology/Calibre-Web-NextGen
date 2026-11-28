@@ -44,15 +44,15 @@ Run Docker from a NAS or a web UI instead of a terminal? Follow the step-by-step
 <!-- progress-tracker:start (regenerate with scripts/progress_tracker.py; do not hand-edit) -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="README_images/progress-throughput-dark.svg">
-  <img alt="Pull request throughput: 43 open, 1,958 closed since May 2026." src="README_images/progress-throughput-light.svg" width="100%">
+  <img alt="Pull request throughput: 28 open, 2,000 closed since May 2026." src="README_images/progress-throughput-light.svg" width="100%">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="README_images/progress-outcomes-dark.svg">
-  <img alt="Fix outcomes by week: 287 happy, 83 not fixed, 500 no reply." src="README_images/progress-outcomes-light.svg" width="100%">
+  <img alt="Fix outcomes by week: 288 happy, 83 not fixed, 524 no reply." src="README_images/progress-outcomes-light.svg" width="100%">
 </picture>
 
-On November 19, 2026, 43 pull requests were open and 1,958 closed, 1,780 of them merged. Of 870 fixes delivered to a person, 33% heard back happy, 10% not fixed and 57% got no reply. When someone did answer, the answer was happy 78% of the time.
+On November 22, 2026, 28 pull requests were open and 2,000 closed, 1,822 of them merged. Of 895 fixes delivered to a person, 32% heard back happy, 9% not fixed and 59% got no reply. When someone did answer, the answer was happy 78% of the time. 4 replies wait to be judged and are left out.
 
 A fix is one moment someone was told their problem was dealt with: a fix PR merged for their issue, their issue closed as done, their own PR merged or closed, or our note on an upstream CWA or Calibre-Web thread pointing them to a fix here. Happy means they then said it works or were content with it. Not fixed means they reopened it, said it is still broken in whole or part, or were unhappy with how it went, and every close in a close-and-reopen cycle counts. No reply means nothing came back. Each reply is judged against [a written rubric](docs/progress-tracker/JUDGING.md) by one model and checked by a second; where they disagree the thread is reread and settled. Every verdict and the quote behind it are in [docs/progress-tracker](docs/progress-tracker/). Replies on Discord and Reddit are not counted.
 
@@ -65,8 +65,8 @@ A fix is one moment someone was told their problem was dealt with: a fix PR merg
 | Jul 2026 | 359 | 362 | 3 | 107 | 26 | 70 |
 | Aug 2026 | 578 | 573 | 11 | 35 | 14 | 71 |
 | Sep 2026 | 224 | 218 | 12 | 23 | 5 | 32 |
-| Oct 2026 | 279 | 241 | 35 | 38 | 5 | 72 |
-| Nov 2026 | 123 | 130 | 53 | 14 | 4 | 60 |
+| Oct 2026 | 279 | 241 | 35 | 38 | 5 | 71 |
+| Nov 2026 | 150 | 172 | 50 | 15 | 4 | 85 |
 
 Regenerate with `python3 scripts/progress_tracker.py fetch`, then `queue`, judge the new replies, `apply` and `render`.
 
@@ -791,35 +791,35 @@ Completion refreshes automatically on every push to `main`, via [`scripts/genera
 | Language | Completion | Strings | Fuzzy |
 |---|---|---:|---:|
 | English (source) | 100% | source | n/a |
-| French (`fr`) | `████████████████████` 99% | 4367/4429 | 1 |
-| German (`de`) | `███████████████████░` 94% | 4140/4429 | 0 |
-| Chinese (Simplified, China) (`zh_Hans_CN`) | `███████████████████░` 93% | 4137/4429 | 1 |
-| Russian (`ru`) | `██████████████████░░` 92% | 4084/4429 | 0 |
-| ca (`ca`) | `██████████████████░░` 92% | 4084/4429 | 0 |
-| Slovak (`sk`) | `██████████████████░░` 92% | 4080/4429 | 0 |
-| Dutch (`nl`) | `███████████████░░░░░` 77% | 3398/4429 | 280 |
-| Swedish (`sv`) | `███████████████░░░░░` 74% | 3295/4429 | 0 |
-| Italian (`it`) | `██████████████░░░░░░` 70% | 3106/4429 | 0 |
-| Spanish (`es`) | `██████████████░░░░░░` 70% | 3090/4429 | 0 |
-| Chinese (Traditional, Taiwan) (`zh_Hant_TW`) | `████████████░░░░░░░░` 60% | 2669/4429 | 172 |
-| Polish (`pl`) | `████████████░░░░░░░░` 58% | 2571/4429 | 0 |
-| Hungarian (`hu`) | `████████░░░░░░░░░░░░` 40% | 1756/4429 | 118 |
-| Arabic (`ar`) | `███████░░░░░░░░░░░░░` 33% | 1463/4429 | 1 |
-| Portuguese (Brazil) (`pt_BR`) | `██████░░░░░░░░░░░░░░` 32% | 1422/4429 | 297 |
-| Japanese (`ja`) | `██████░░░░░░░░░░░░░░` 30% | 1330/4429 | 235 |
-| Slovenian (`sl`) | `██████░░░░░░░░░░░░░░` 28% | 1225/4429 | 303 |
-| Portuguese (`pt`) | `█████░░░░░░░░░░░░░░░` 27% | 1190/4429 | 340 |
-| Korean (`ko`) | `████░░░░░░░░░░░░░░░░` 22% | 968/4429 | 257 |
-| Galician (`gl`) | `███░░░░░░░░░░░░░░░░░` 16% | 705/4429 | 343 |
-| Indonesian (`id`) | `███░░░░░░░░░░░░░░░░░` 16% | 706/4429 | 344 |
-| Greek (`el`) | `██░░░░░░░░░░░░░░░░░░` 12% | 537/4429 | 382 |
-| Czech (`cs`) | `██░░░░░░░░░░░░░░░░░░` 12% | 509/4429 | 391 |
-| Ukrainian (`uk`) | `██░░░░░░░░░░░░░░░░░░` 11% | 478/4429 | 358 |
-| Norwegian (`no`) | `██░░░░░░░░░░░░░░░░░░` 10% | 464/4429 | 418 |
-| Vietnamese (`vi`) | `██░░░░░░░░░░░░░░░░░░` 10% | 456/4429 | 339 |
-| Finnish (`fi`) | `██░░░░░░░░░░░░░░░░░░` 9% | 389/4429 | 372 |
-| Turkish (`tr`) | `█░░░░░░░░░░░░░░░░░░░` 7% | 323/4429 | 370 |
-| Khmer (`km`) | `█░░░░░░░░░░░░░░░░░░░` 5% | 241/4429 | 331 |
+| Chinese (Simplified, China) (`zh_Hans_CN`) | `████████████████████` 100% | 4426/4428 | 1 |
+| German (`de`) | `████████████████████` 100% | 4427/4428 | 0 |
+| French (`fr`) | `████████████████████` 99% | 4366/4428 | 1 |
+| Russian (`ru`) | `██████████████████░░` 92% | 4082/4428 | 0 |
+| ca (`ca`) | `██████████████████░░` 92% | 4082/4428 | 0 |
+| Slovak (`sk`) | `██████████████████░░` 92% | 4078/4428 | 0 |
+| Dutch (`nl`) | `███████████████░░░░░` 77% | 3397/4428 | 280 |
+| Swedish (`sv`) | `███████████████░░░░░` 74% | 3293/4428 | 0 |
+| Italian (`it`) | `██████████████░░░░░░` 70% | 3104/4428 | 0 |
+| Spanish (`es`) | `██████████████░░░░░░` 70% | 3088/4428 | 0 |
+| Chinese (Traditional, Taiwan) (`zh_Hant_TW`) | `████████████░░░░░░░░` 60% | 2668/4428 | 171 |
+| Polish (`pl`) | `████████████░░░░░░░░` 58% | 2569/4428 | 0 |
+| Portuguese (`pt`) | `████████░░░░░░░░░░░░` 40% | 1790/4428 | 338 |
+| Hungarian (`hu`) | `████████░░░░░░░░░░░░` 40% | 1754/4428 | 118 |
+| Arabic (`ar`) | `███████░░░░░░░░░░░░░` 33% | 1461/4428 | 1 |
+| Portuguese (Brazil) (`pt_BR`) | `██████░░░░░░░░░░░░░░` 32% | 1421/4428 | 296 |
+| Japanese (`ja`) | `██████░░░░░░░░░░░░░░` 30% | 1330/4428 | 233 |
+| Slovenian (`sl`) | `██████░░░░░░░░░░░░░░` 28% | 1225/4428 | 301 |
+| Korean (`ko`) | `████░░░░░░░░░░░░░░░░` 22% | 968/4428 | 255 |
+| Galician (`gl`) | `███░░░░░░░░░░░░░░░░░` 16% | 705/4428 | 341 |
+| Indonesian (`id`) | `███░░░░░░░░░░░░░░░░░` 16% | 706/4428 | 342 |
+| Greek (`el`) | `██░░░░░░░░░░░░░░░░░░` 12% | 537/4428 | 380 |
+| Czech (`cs`) | `██░░░░░░░░░░░░░░░░░░` 12% | 509/4428 | 389 |
+| Ukrainian (`uk`) | `██░░░░░░░░░░░░░░░░░░` 11% | 478/4428 | 356 |
+| Norwegian (`no`) | `██░░░░░░░░░░░░░░░░░░` 10% | 464/4428 | 416 |
+| Vietnamese (`vi`) | `██░░░░░░░░░░░░░░░░░░` 10% | 456/4428 | 337 |
+| Finnish (`fi`) | `██░░░░░░░░░░░░░░░░░░` 9% | 389/4428 | 370 |
+| Turkish (`tr`) | `█░░░░░░░░░░░░░░░░░░░` 7% | 323/4428 | 368 |
+| Khmer (`km`) | `█░░░░░░░░░░░░░░░░░░░` 5% | 241/4428 | 329 |
 <!-- TRANSLATION_STATUS_END -->
 
 </details>
